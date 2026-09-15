@@ -29,12 +29,10 @@ class SimulationSettings:
     Attributes:
         dt: Timestep duration (s).
         total_time_steps: Number of timesteps to simulate.
-        volume: Volume of each compartment (liters).
         temperature: Absolute temperature (K).
     """
     dt: float
     total_time_steps: int
-    volume: float
     temperature: float
 
 
@@ -46,11 +44,13 @@ class CompartmentSpec:
         name: Compartment label (e.g. 'A', 'B').
         na_conc: Initial Na+ concentration.
         cl_conc: Initial Cl- concentration.
+        volume: Compartment volume (liters).
         mg_conc: Initial Mg2+ concentration.
     """
     name: str
     na_conc: float
     cl_conc: float
+    volume: float
     mg_conc: float = 0.0
 
 
@@ -121,11 +121,15 @@ class Scenario:
 # Thick Ascending Limb (TAL) data
 # ============================================================================
 
-TAL_SETTINGS = SimulationSettings(dt=0.0001, total_time_steps=1_000_000, volume=8e-20, temperature=310)
+TAL_SETTINGS = SimulationSettings(dt=0.0001, total_time_steps=1_000_000, temperature=310)
+
+# Currently uniform across all TAL compartments -- compartments could be given
+# different volumes independently, since each CompartmentSpec carries its own.
+TAL_VOLUME = 8e-20
 
 # ---- Permeabilities ----
 # Cldn10b: PNa:PCl = 10:1; PMg:PCl = 3:1
-# Cldn16+19: PNa:PCl = 2.5:1; PMg:PCl = 8.5:1
+# Cldn16/19: PNa:PCl = 2.5:1; PMg:PCl = 8.5:1
 P_CL = 1.0  # baseline
 
 P_NA_10B = 10.0
@@ -151,10 +155,10 @@ V_CLAMP_STATE1 = -0.009  # V; represents the 5-13 mV lumen-positive potential, s
 def _tal_state1() -> Scenario:
     """Early/medullary TAL (mTAL): high luminal concentrations, voltage-clamped, Cldn10b only."""
     compartments = (
-        CompartmentSpec('A', na_conc=250, cl_conc=233, mg_conc=2.0),  # apical, high luminal (medullary side)
-        CompartmentSpec('B', na_conc=145, cl_conc=105, mg_conc=0.5),  # tight-junction compartment
-        CompartmentSpec('C', na_conc=145, cl_conc=105, mg_conc=0.5),  # tight-junction compartment
-        CompartmentSpec('D', na_conc=145, cl_conc=105, mg_conc=0.5),  # basolateral, plasma (fixed, physiological)
+        CompartmentSpec('A', na_conc=250, cl_conc=233, volume=TAL_VOLUME, mg_conc=2.0),  # apical, high luminal (medullary side)
+        CompartmentSpec('B', na_conc=145, cl_conc=105, volume=TAL_VOLUME, mg_conc=0.5),  # tight-junction compartment
+        CompartmentSpec('C', na_conc=145, cl_conc=105, volume=TAL_VOLUME, mg_conc=0.5),  # tight-junction compartment
+        CompartmentSpec('D', na_conc=145, cl_conc=105, volume=TAL_VOLUME, mg_conc=0.5),  # basolateral, plasma (fixed, physiological)
     )
     # Voltage clamp of 9 mV on the whole A-D chain, split evenly across the 3 junctions
     # (active transcellular pump contribution).
@@ -173,10 +177,10 @@ def _tal_state1() -> Scenario:
 def _tal_state2_parallel() -> Scenario:
     """Late/cortical TAL (cTAL): dilute luminal concentrations, no clamp, Cldn10b + Cldn16/19 in parallel."""
     compartments = (
-        CompartmentSpec('A', na_conc=50, cl_conc=45, mg_conc=0.2),  # apical, dilute (active NaCl reabsorption)
-        CompartmentSpec('B', na_conc=145, cl_conc=105, mg_conc=0.5),
-        CompartmentSpec('C', na_conc=145, cl_conc=105, mg_conc=0.5),
-        CompartmentSpec('D', na_conc=145, cl_conc=105, mg_conc=0.5),
+        CompartmentSpec('A', na_conc=50, cl_conc=45, volume=TAL_VOLUME, mg_conc=0.2),  # apical, dilute (active NaCl reabsorption)
+        CompartmentSpec('B', na_conc=145, cl_conc=105, volume=TAL_VOLUME, mg_conc=0.5),
+        CompartmentSpec('C', na_conc=145, cl_conc=105, volume=TAL_VOLUME, mg_conc=0.5),
+        CompartmentSpec('D', na_conc=145, cl_conc=105, volume=TAL_VOLUME, mg_conc=0.5),
     )
     # Neither pathway is clamped here -- both must be free to compute their own
     # equilibrium potential from their own permeabilities. engine.run_simulation
@@ -210,10 +214,10 @@ def _tal_state2_parallel() -> Scenario:
 def _tal_state2_avg() -> Scenario:
     """Late/cortical TAL (cTAL), single averaged claudin (double permeability) for comparison against parallel mode."""
     compartments = (
-        CompartmentSpec('A', na_conc=50, cl_conc=45, mg_conc=0.2),
-        CompartmentSpec('B', na_conc=145, cl_conc=105, mg_conc=0.5),
-        CompartmentSpec('C', na_conc=145, cl_conc=105, mg_conc=0.5),
-        CompartmentSpec('D', na_conc=145, cl_conc=105, mg_conc=0.5),
+        CompartmentSpec('A', na_conc=50, cl_conc=45, volume=TAL_VOLUME, mg_conc=0.2),
+        CompartmentSpec('B', na_conc=145, cl_conc=105, volume=TAL_VOLUME, mg_conc=0.5),
+        CompartmentSpec('C', na_conc=145, cl_conc=105, volume=TAL_VOLUME, mg_conc=0.5),
+        CompartmentSpec('D', na_conc=145, cl_conc=105, volume=TAL_VOLUME, mg_conc=0.5),
     )
     pathway = Pathway(
         name="avg",

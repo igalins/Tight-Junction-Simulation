@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/opt/homebrew/Caskroom/miniconda/base/envs/claudin/bin/python -m pytest tests/ -q)",
+      "Bash(/opt/homebrew/Caskroom/miniconda/base/envs/claudin/bin/python -m pytest tests/test_engine.py -v)"
+    ]
+  }
+}

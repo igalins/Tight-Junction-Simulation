@@ -39,7 +39,10 @@ def build_scenario(scenario: Scenario):
             compartments: dict of compartment name -> ``Compartment``.
             pathway_junctions: dict of pathway name -> list of ``Junctions``, in chain order.
     """
-    compartments = {c.name: Compartment(c.name, c.na_conc, c.cl_conc, c.mg_conc) for c in scenario.compartments}
+    compartments = {
+        c.name: Compartment(c.name, c.na_conc, c.cl_conc, volume=c.volume, mg_conc=c.mg_conc)
+        for c in scenario.compartments
+    }
 
     pathway_junctions = {}
     for pathway in scenario.pathways:
@@ -81,7 +84,7 @@ def run_simulation(
     Args:
         compartments: dict of compartment name -> ``Compartment``, e.g. from ``build_scenario``.
         pathway_junctions: dict of pathway name -> list of ``Junctions`` (1 or 2 entries).
-        settings: Numeric simulation parameters (dt, total_time_steps, volume, temperature).
+        settings: Numeric simulation parameters (dt, total_time_steps, temperature).
         constants: Physical constants (R, F, Avogadro).
         ion_list: Ions to simulate.
         divalent: Whether to use the Mg2+-extended potential equation.
@@ -162,11 +165,10 @@ def run_simulation(
             for j in junctions:
                 membrane_pot = j.calculate_potentials(R, T, F, divalent=divalent)
                 potential_history[name][f"{j.apical.name}->{j.basolateral.name}"].append(-membrane_pot * 1000)
-                changes = j.calculate_fluxes(R, T, F, ion_list, membrane_pot, settings.dt, settings.volume)
+                changes = j.calculate_fluxes(R, T, F, ion_list, membrane_pot, settings.dt)
                 for ion, amount in changes.items():
-                    conc_change = amount / (constants.Avogadro * settings.volume)
-                    deltas[j.apical.name][ion] -= conc_change
-                    deltas[j.basolateral.name][ion] += conc_change
+                    deltas[j.apical.name][ion] -= amount / (constants.Avogadro * j.apical.volume)
+                    deltas[j.basolateral.name][ion] += amount / (constants.Avogadro * j.basolateral.volume)
                     flow_history[name][f"{j.apical.name}->{j.basolateral.name}"][ion].append(amount)
 
         # update every compartment except the fixed boundary reservoirs

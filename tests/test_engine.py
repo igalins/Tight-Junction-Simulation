@@ -56,8 +56,8 @@ class TestRunSimulationSinglePathway:
 
 class TestRunSimulationPathwayCountValidation:
     def _minimal_pathway_junctions(self, n):
-        a = Compartment('A', na_conc=100.0, cl_conc=100.0, mg_conc=0.5)
-        b = Compartment('B', na_conc=100.0, cl_conc=100.0, mg_conc=0.5)
+        a = Compartment('A', na_conc=100.0, cl_conc=100.0, volume=8e-20, mg_conc=0.5)
+        b = Compartment('B', na_conc=100.0, cl_conc=100.0, volume=8e-20, mg_conc=0.5)
         return {
             f"pathway_{i}": [Junctions(a, b, p_na=10.0, p_cl=1.0, p_mg=3.0)]
             for i in range(n)
@@ -65,11 +65,11 @@ class TestRunSimulationPathwayCountValidation:
 
     def test_raises_for_zero_pathways(self):
         with pytest.raises(ValueError):
-            run_simulation({}, self._minimal_pathway_junctions(0), SimulationSettings(dt=1e-4, total_time_steps=1, volume=8e-20, temperature=310))
+            run_simulation({}, self._minimal_pathway_junctions(0), SimulationSettings(dt=1e-4, total_time_steps=1, temperature=310))
 
     def test_raises_for_three_pathways(self):
         with pytest.raises(ValueError):
-            run_simulation({}, self._minimal_pathway_junctions(3), SimulationSettings(dt=1e-4, total_time_steps=1, volume=8e-20, temperature=310))
+            run_simulation({}, self._minimal_pathway_junctions(3), SimulationSettings(dt=1e-4, total_time_steps=1, temperature=310))
 
     def test_raises_when_a_resistance_is_missing_for_two_pathways(self):
         compartments, pathway_junctions = build_scenario(TAL_STATE2_PARALLEL)
@@ -88,7 +88,9 @@ class TestSharedVoltageStep:
         """Independently recompute, from a snapshot of concentrations, what the shared
         potential across each junction pair SHOULD be -- without going through
         run_simulation at all, so it can't share its bug."""
-        comps = {name: Compartment(name, vals['Na'], vals['Cl'], vals['Mg']) for name, vals in concentrations_at_t.items()}
+        # volume is irrelevant here -- this helper only calls calculate_potentials, which
+        # never reads it -- so every compartment gets the same placeholder value.
+        comps = {name: Compartment(name, vals['Na'], vals['Cl'], volume=8e-20, mg_conc=vals['Mg']) for name, vals in concentrations_at_t.items()}
         name_1, name_2 = [p.name for p in pathways]
         specs_1, specs_2 = pathways[0].junctions, pathways[1].junctions
         R1, R2 = resistances[name_1], resistances[name_2]
@@ -187,3 +189,40 @@ class TestRegressionAgainstPreRefactorBaseline:
 
     def test_state2_avg(self, baseline):
         self._check(baseline, "state2_avg", TAL_STATE2_AVG, {'avg': 'flow10b'})
+
+
+class TestConcentrationTrajectoryDependsOnVolume:
+    """Regression tests for the volume-cancellation fix (see CHANGELOG.md): compartment
+    volume previously had zero effect on concentration_history, since engine.py divided
+    a flux-derived ion count back out by the exact same shared volume it was multiplied
+    by. Each compartment now carries its own volume, and the two legs no longer cancel."""
+
+    def _deltas_after_one_step(self, apical_volume, basolateral_volume):
+        apical = Compartment('apical', na_conc=200.0, cl_conc=1.0, volume=apical_volume, mg_conc=1.0)
+        basolateral = Compartment('basolateral', na_conc=50.0, cl_conc=1.0, volume=basolateral_volume, mg_conc=1.0)
+        junction = Junctions(apical, basolateral, p_na=10.0, p_cl=0.0, p_mg=0.0, voltage_clamp=0.0)
+        settings = SimulationSettings(dt=1e-4, total_time_steps=2, temperature=310)
+        result = run_simulation(
+            {'apical': apical, 'basolateral': basolateral}, {'only': [junction]}, settings,
+            ion_list=('Na',), fixed_compartments=(),
+        )
+        return {
+            'apical': result.concentration_history['apical']['Na'][1] - result.concentration_history['apical']['Na'][0],
+            'basolateral': result.concentration_history['basolateral']['Na'][1] - result.concentration_history['basolateral']['Na'][0],
+        }
+
+    def test_donor_side_change_is_independent_of_its_own_volume(self):
+        # apical (200) > basolateral (50), zero clamp -> Na diffuses apical->basolateral,
+        # i.e. apical is the donor. A donor's own concentration follows flux*dt regardless
+        # of its own volume -- this was already true pre-fix and must stay true.
+        default = self._deltas_after_one_step(apical_volume=8e-20, basolateral_volume=8e-20)
+        smaller_donor = self._deltas_after_one_step(apical_volume=8e-20 / 10, basolateral_volume=8e-20)
+        assert smaller_donor['apical'] == pytest.approx(default['apical'])
+
+    def test_recipient_side_change_scales_with_donor_volume(self):
+        # The same transported ion count now converts to a bigger concentration swing
+        # on the recipient (basolateral) side when the donor is smaller -- this is the
+        # behavior that was previously impossible (volume cancelled out entirely).
+        default = self._deltas_after_one_step(apical_volume=8e-20, basolateral_volume=8e-20)
+        smaller_donor = self._deltas_after_one_step(apical_volume=8e-20 / 10, basolateral_volume=8e-20)
+        assert smaller_donor['basolateral'] == pytest.approx(default['basolateral'] / 10)

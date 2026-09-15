@@ -10,7 +10,7 @@ import numpy as np
 from scipy.constants import Avogadro as _AVOGADRO
 
 
-def nernst_equation(R, T, F, z, C_start, C_end, ion_name):
+def nernst_equation(R, T, F, z, conc_apical, conc_basolateral, ion_name):
     """Equilibrium (Nernst) potential for one ion across a boundary.
 
     Args:
@@ -18,8 +18,8 @@ def nernst_equation(R, T, F, z, C_start, C_end, ion_name):
         T: Absolute temperature (K).
         F: Faraday constant.
         z: Ion valence (e.g. +1 for Na+, -1 for Cl-, +2 for Mg2+).
-        C_start: Concentration on the starting (e.g. apical) side.
-        C_end: Concentration on the ending (e.g. basolateral) side.
+        conc_apical: Concentration on the apical side.
+        conc_basolateral: Concentration on the basolateral side.
         ion_name: Ion label, used only for the error message.
 
     Returns:
@@ -28,22 +28,21 @@ def nernst_equation(R, T, F, z, C_start, C_end, ion_name):
     Raises:
         ValueError: If either concentration is non-positive (the log is undefined).
     """
-    if C_start <= 0 or C_end <= 0:
+    if conc_apical <= 0 or conc_basolateral <= 0:
         raise ValueError(
             f"Non-positive concentration for {ion_name}: "
-            f"C_start={C_start:.6f}, C_end={C_end:.6f}"
+            f"conc_apical={conc_apical:.6f}, conc_basolateral={conc_basolateral:.6f}"
         )
 
-    return ((R * T) / (F * z)) * math.log(C_start / C_end)
+    return ((R * T) / (F * z)) * math.log(conc_apical / conc_basolateral)
 
 
-def goldmann_equation(R, T, F, P_Na, P_Cl, Na_L, Cl_L, Na_R, Cl_R):
+def goldmann_equation(R, T, F, P_Na, P_Cl, na_apical, cl_apical, na_basolateral, cl_basolateral):
     """Goldman-Hodgkin-Katz membrane potential for monovalent ions (Na+, Cl-) only.
 
-    L/R follow the apical/basolateral convention used throughout this package:
-    L = apical (left) side, R = basolateral (right) side. For Na+, a positive
-    result means a positive flux (apical to basolateral); for Cl-, a positive
-    result means a negative flux (basolateral to apical).
+    For Na+, a positive result means a positive flux (apical to
+    basolateral); for Cl-, a positive result means a negative flux
+    (basolateral to apical).
 
     Args:
         R: Gas constant.
@@ -51,17 +50,17 @@ def goldmann_equation(R, T, F, P_Na, P_Cl, Na_L, Cl_L, Na_R, Cl_R):
         F: Faraday constant.
         P_Na: Na+ permeability.
         P_Cl: Cl- permeability.
-        Na_L: Apical Na+ concentration.
-        Cl_L: Apical Cl- concentration.
-        Na_R: Basolateral Na+ concentration.
-        Cl_R: Basolateral Cl- concentration.
+        na_apical: Apical Na+ concentration.
+        cl_apical: Apical Cl- concentration.
+        na_basolateral: Basolateral Na+ concentration.
+        cl_basolateral: Basolateral Cl- concentration.
 
     Returns:
         The membrane potential in volts.
     """
     epsilon = 1e-15  # avoids a division-by-zero when all permeabilities/concentrations are 0
-    numerator = (P_Na * Na_L) + (P_Cl * Cl_R) + epsilon
-    denominator = (P_Na * Na_R) + (P_Cl * Cl_L) + epsilon
+    numerator = (P_Na * na_apical) + (P_Cl * cl_basolateral) + epsilon
+    denominator = (P_Na * na_basolateral) + (P_Cl * cl_apical) + epsilon
 
     return (R * T / F) * math.log(numerator / denominator)
 
@@ -117,30 +116,31 @@ def EMF(equilibrium_pot, nernst_pot):
     return nernst_pot - equilibrium_pot
 
 
-def calculate_flux(emf, p, z, start_comp, end_comp, ion_name):
+def calculate_flux(emf, p, z, apical_comp, basolateral_comp, ion_name):
     """Ion flux across a junction, proportional to EMF, permeability, and donor-side concentration.
 
     The donor compartment is whichever side the net electrochemical drive
-    (``emf * p * z``) pushes ions away from: ``start_comp`` when driving flux
-    from start to end, ``end_comp`` otherwise (including the exact zero case).
+    (``emf * p * z``) pushes ions away from: ``apical_comp`` when driving flux
+    from apical to basolateral, ``basolateral_comp`` otherwise (including the
+    exact zero case).
 
     Args:
         emf: Electromotive force for this ion (see ``EMF``).
         p: Permeability of this ion at the junction.
         z: Ion valence.
-        start_comp: The "start" (e.g. apical) ``Compartment``.
-        end_comp: The "end" (e.g. basolateral) ``Compartment``.
+        apical_comp: The apical ``Compartment``.
+        basolateral_comp: The basolateral ``Compartment``.
         ion_name: Key into each compartment's ``concentrations`` dict.
 
     Returns:
-        The flux (sign indicates direction: positive = start to end).
+        The flux (sign indicates direction: positive = apical to basolateral).
     """
-    C_start = start_comp.concentrations[ion_name]
-    C_end = end_comp.concentrations[ion_name]
+    conc_apical = apical_comp.concentrations[ion_name]
+    conc_basolateral = basolateral_comp.concentrations[ion_name]
     if emf * p * z > 0:  # ions move from apical to basolateral
-        return emf * p * z * C_start
+        return emf * p * z * conc_apical
     else:  # ions move from basolateral to apical
-        return emf * p * z * C_end
+        return emf * p * z * conc_basolateral
 
 
 def calculate_ion_change(flux, vol_liters, dt, avogadro=_AVOGADRO):

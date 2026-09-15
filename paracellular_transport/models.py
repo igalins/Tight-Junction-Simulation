@@ -12,17 +12,19 @@ from .physics import (
 class Compartment(object):
     """A fluid compartment (e.g. tubule lumen, tight-junction pocket, or blood side) with ion concentrations."""
 
-    def __init__(self, name, na_conc, cl_conc, mg_conc=0):
+    def __init__(self, name, na_conc, cl_conc, volume, mg_conc=0):
         """Create a compartment.
 
         Args:
             name: Compartment label (e.g. 'A', 'B').
             na_conc: Initial Na+ concentration.
             cl_conc: Initial Cl- concentration.
+            volume: Compartment volume (liters).
             mg_conc: Initial Mg2+ concentration (default 0, for monovalent-only runs).
         """
         self.name = name
         self.concentrations = {'Na': na_conc, 'Cl': cl_conc, 'Mg': mg_conc}
+        self.volume = volume
 
     def get_ion_counts(self, ion_conc, volume, avogadro):
         """Convert a concentration to an absolute ion count for this compartment's volume.
@@ -85,31 +87,35 @@ class Junctions(object):
         """
         if self.voltage_clamp is not None:
             return self.voltage_clamp
-        # l: apical, r: basolateral
-        c_na_l = self.apical.concentrations['Na']
-        c_na_r = self.basolateral.concentrations['Na']
-        c_cl_l = self.apical.concentrations['Cl']
-        c_cl_r = self.basolateral.concentrations['Cl']
-        c_mg_l = self.apical.concentrations['Mg']
-        c_mg_r = self.basolateral.concentrations['Mg']
+        na_apical = self.apical.concentrations['Na']
+        na_basolateral = self.basolateral.concentrations['Na']
+        cl_apical = self.apical.concentrations['Cl']
+        cl_basolateral = self.basolateral.concentrations['Cl']
+        mg_apical = self.apical.concentrations['Mg']
+        mg_basolateral = self.basolateral.concentrations['Mg']
 
         if divalent:
             # divalent_membrane_potential takes (basolateral, apical) per ion —
             # the opposite order of goldmann_equation below. See physics.py.
             membrane_pot = divalent_membrane_potential(self.permeabilities['Mg'], self.permeabilities['Na'], self.permeabilities['Cl'],
-                                                       c_mg_r, c_mg_l, c_na_r, c_na_l, c_cl_r, c_cl_l, R, T, F)
+                                                       mg_basolateral, mg_apical, na_basolateral, na_apical, cl_basolateral, cl_apical, R, T, F)
         else:
             membrane_pot = goldmann_equation(R, T, F, self.permeabilities['Na'], self.permeabilities['Cl'],
-                                            c_na_l, c_cl_l, c_na_r, c_cl_r)
+                                            na_apical, cl_apical, na_basolateral, cl_basolateral)
 
         return membrane_pot
 
-    def calculate_fluxes(self, R, T, F, ion_list, membrane_pot, dt, volume):
+    def calculate_fluxes(self, R, T, F, ion_list, membrane_pot, dt):
         """Compute each ion's count change across this junction for one timestep.
 
         For each ion in ``ion_list``: derives its Nernst potential, combines
         it with ``membrane_pot`` into an EMF, computes the resulting flux, and
-        converts that flux into an ion-count change.
+        converts that flux into an ion-count change using the donor side's
+        own volume (whichever side ``calculate_flux`` drew its concentration
+        from) — this is the ion count actually leaving that compartment, and
+        conservation carries it unchanged to the other side; converting it
+        back into each side's own concentration change is the caller's job
+        (see ``engine.run_simulation``), since that requires both volumes.
 
         Note the valence lookup assumes any ion that isn't 'Na' or 'Cl' is a
         divalent cation (z=+2) — a known limitation if a future segment adds a
@@ -122,7 +128,6 @@ class Junctions(object):
             ion_list: Ion keys to process, e.g. ('Na', 'Cl', 'Mg').
             membrane_pot: This junction's membrane potential (volts).
             dt: Timestep duration (s).
-            volume: Compartment volume in liters (shared by both sides).
 
         Returns:
             Dict mapping each ion to its count change for this timestep.
@@ -138,15 +143,17 @@ class Junctions(object):
             else:
                 z = 2
 
-            C_l = self.apical.concentrations[ion]
-            C_r = self.basolateral.concentrations[ion]
+            conc_apical = self.apical.concentrations[ion]
+            conc_basolateral = self.basolateral.concentrations[ion]
 
             # Nernst + Membrane Pot. -> EMF -> flux
-            nernst = nernst_equation(R, T, F, z, C_l, C_r, ion)
+            nernst = nernst_equation(R, T, F, z, conc_apical, conc_basolateral, ion)
             emf = EMF(membrane_pot, nernst)
             flux = calculate_flux(emf, p, z, self.apical, self.basolateral, ion)
 
-            # Convert flux to molar change
-            ion_count_changes[ion] = calculate_ion_change(flux, volume, dt)
+            # Convert flux to an ion count using whichever side donated it
+            # (calculate_flux's own apical/basolateral branch, mirrored via flux's sign).
+            donor_volume = self.apical.volume if flux > 0 else self.basolateral.volume
+            ion_count_changes[ion] = calculate_ion_change(flux, donor_volume, dt)
 
         return ion_count_changes
