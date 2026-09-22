@@ -7,6 +7,7 @@ concrete data for the Thick Ascending Limb (TAL). A future nephron segment
 ``Scenario`` instances here, reusing the same schema and the same
 ``engine.run_simulation`` loop.
 """
+import string
 from dataclasses import dataclass
 from scipy.constants import Avogadro, gas_constant, physical_constants
 
@@ -121,7 +122,7 @@ class Scenario:
 # Thick Ascending Limb (TAL) data
 # ============================================================================
 
-TAL_SETTINGS = SimulationSettings(dt=0.0001, total_time_steps=1_000_000, temperature=310)
+TAL_SETTINGS = SimulationSettings(dt=0.0001, total_time_steps=2_000_000, temperature=310)
 
 # Currently uniform across all TAL compartments -- compartments could be given
 # different volumes independently, since each CompartmentSpec carries its own.
@@ -149,92 +150,96 @@ R_10B = 14.0
 R_1619 = 19.0
 
 # ---- Voltage clamp (State 1 only) ----
-V_CLAMP_STATE1 = -0.009  # V; represents the 5-13 mV lumen-positive potential, split evenly across the 3 junctions
+V_CLAMP_STATE1 = -0.009  # V; represents the 5-13 mV lumen-positive potential, split evenly across the chain's junctions
 
 
-def _tal_state1() -> Scenario:
+# ---- Generic compartment-chain builders ----
+# Each JunctionSpec in a pathway's chain represents one physical tight-junction
+# (claudin) strand in series. A chain of n_strands strands has n_strands + 1
+# compartments: the apical/luminal reservoir, n_strands - 1 interior
+# "tight-junction compartment" pockets between strands, and the basolateral/
+# plasma reservoir -- both reservoirs are the scenario's fixed_compartments.
+
+def _chain_compartment_names(n_strands):
+    """Compartment names for a chain of n_strands strands, e.g. ('A','B','C','D') for 3."""
+    return tuple(string.ascii_uppercase[:n_strands + 1])
+
+
+def _chain_compartments(n_strands, apical_na, apical_cl, apical_mg):
+    """The apical reservoir at the given concentrations, followed by every remaining
+    compartment (tj compartments + the basolateral reservoir) at the shared
+    plasma-like concentrations used throughout the TAL scenarios."""
+    names = _chain_compartment_names(n_strands)
+    apical = CompartmentSpec(names[0], na_conc=apical_na, cl_conc=apical_cl, volume=TAL_VOLUME, mg_conc=apical_mg)
+    rest = tuple(
+        CompartmentSpec(name, na_conc=145, cl_conc=105, volume=TAL_VOLUME, mg_conc=0.5)
+        for name in names[1:]
+    )
+    return (apical,) + rest
+
+
+def _chain_junctions(n_strands, p_na, p_cl, p_mg, voltage_clamp=None):
+    """One JunctionSpec per consecutive compartment pair, all sharing the same permeabilities."""
+    names = _chain_compartment_names(n_strands)
+    return tuple(
+        JunctionSpec(names[i], names[i + 1], p_na, p_cl, p_mg, voltage_clamp=voltage_clamp)
+        for i in range(n_strands)
+    )
+
+
+def _tal_state1(n_strands=3) -> Scenario:
     """Early/medullary TAL (mTAL): high luminal concentrations, voltage-clamped, Cldn10b only."""
-    compartments = (
-        CompartmentSpec('A', na_conc=250, cl_conc=233, volume=TAL_VOLUME, mg_conc=2.0),  # apical, high luminal (medullary side)
-        CompartmentSpec('B', na_conc=145, cl_conc=105, volume=TAL_VOLUME, mg_conc=0.5),  # tight-junction compartment
-        CompartmentSpec('C', na_conc=145, cl_conc=105, volume=TAL_VOLUME, mg_conc=0.5),  # tight-junction compartment
-        CompartmentSpec('D', na_conc=145, cl_conc=105, volume=TAL_VOLUME, mg_conc=0.5),  # basolateral, plasma (fixed, physiological)
-    )
-    # Voltage clamp of 9 mV on the whole A-D chain, split evenly across the 3 junctions
+    compartments = _chain_compartments(n_strands, apical_na=250, apical_cl=233, apical_mg=2.0)
+    names = _chain_compartment_names(n_strands)
+    # Voltage clamp of 9 mV on the whole chain, split evenly across its junctions
     # (active transcellular pump contribution).
-    clamp = V_CLAMP_STATE1 / 3
-    pathway = Pathway(
-        name="10b",
-        junctions=(
-            JunctionSpec('A', 'B', P_NA_10B, P_CL, P_MG_10B, voltage_clamp=clamp),
-            JunctionSpec('B', 'C', P_NA_10B, P_CL, P_MG_10B, voltage_clamp=clamp),
-            JunctionSpec('C', 'D', P_NA_10B, P_CL, P_MG_10B, voltage_clamp=clamp),
-        ),
-    )
-    return Scenario(name="TAL State 1 (mTAL)", settings=TAL_SETTINGS, compartments=compartments, pathways=(pathway,))
-
-
-def _tal_state2_parallel() -> Scenario:
-    """Late/cortical TAL (cTAL): dilute luminal concentrations, no clamp, Cldn10b + Cldn16/19 in parallel."""
-    compartments = (
-        CompartmentSpec('A', na_conc=50, cl_conc=45, volume=TAL_VOLUME, mg_conc=0.2),  # apical, dilute (active NaCl reabsorption)
-        CompartmentSpec('B', na_conc=145, cl_conc=105, volume=TAL_VOLUME, mg_conc=0.5),
-        CompartmentSpec('C', na_conc=145, cl_conc=105, volume=TAL_VOLUME, mg_conc=0.5),
-        CompartmentSpec('D', na_conc=145, cl_conc=105, volume=TAL_VOLUME, mg_conc=0.5),
-    )
-    # Neither pathway is clamped here -- both must be free to compute their own
-    # equilibrium potential from their own permeabilities. engine.run_simulation
-    # combines them into a shared voltage (resistance-weighted) fresh every timestep.
-    pathway_10b = Pathway(
-        name="10b",
-        junctions=(
-            JunctionSpec('A', 'B', P_NA_10B, P_CL, P_MG_10B),
-            JunctionSpec('B', 'C', P_NA_10B, P_CL, P_MG_10B),
-            JunctionSpec('C', 'D', P_NA_10B, P_CL, P_MG_10B),
-        ),
-        resistance=R_10B,
-    )
-    pathway_1619 = Pathway(
-        name="16_19",
-        junctions=(
-            JunctionSpec('A', 'B', P_NA_1619, P_CL, P_MG_1619),
-            JunctionSpec('B', 'C', P_NA_1619, P_CL, P_MG_1619),
-            JunctionSpec('C', 'D', P_NA_1619, P_CL, P_MG_1619),
-        ),
-        resistance=R_1619,
-    )
+    clamp = V_CLAMP_STATE1 / n_strands
+    pathway = Pathway(name="10b", junctions=_chain_junctions(n_strands, P_NA_10B, P_CL, P_MG_10B, voltage_clamp=clamp))
     return Scenario(
-        name="TAL State 2, parallel claudins (cTAL)",
-        settings=TAL_SETTINGS,
-        compartments=compartments,
-        pathways=(pathway_10b, pathway_1619),
-    )
-
-
-def _tal_state2_avg() -> Scenario:
-    """Late/cortical TAL (cTAL), single averaged claudin (double permeability) for comparison against parallel mode."""
-    compartments = (
-        CompartmentSpec('A', na_conc=50, cl_conc=45, volume=TAL_VOLUME, mg_conc=0.2),
-        CompartmentSpec('B', na_conc=145, cl_conc=105, volume=TAL_VOLUME, mg_conc=0.5),
-        CompartmentSpec('C', na_conc=145, cl_conc=105, volume=TAL_VOLUME, mg_conc=0.5),
-        CompartmentSpec('D', na_conc=145, cl_conc=105, volume=TAL_VOLUME, mg_conc=0.5),
-    )
-    pathway = Pathway(
-        name="avg",
-        junctions=(
-            JunctionSpec('A', 'B', P_NA_AVG, P_CL_AVG, P_MG_AVG),
-            JunctionSpec('B', 'C', P_NA_AVG, P_CL_AVG, P_MG_AVG),
-            JunctionSpec('C', 'D', P_NA_AVG, P_CL_AVG, P_MG_AVG),
-        ),
-    )
-    return Scenario(
-        name="TAL State 2, averaged claudin (cTAL)",
+        name=f"TAL State 1 (mTAL), {n_strands} strands",
         settings=TAL_SETTINGS,
         compartments=compartments,
         pathways=(pathway,),
+        fixed_compartments=(names[0], names[-1]),
+    )
+
+
+def _tal_state2_parallel(n_strands=3) -> Scenario:
+    """Late/cortical TAL (cTAL): dilute luminal concentrations, no clamp, Cldn10b + Cldn16/19 in parallel."""
+    compartments = _chain_compartments(n_strands, apical_na=50, apical_cl=45, apical_mg=0.2)
+    names = _chain_compartment_names(n_strands)
+    # Neither pathway is clamped here -- both must be free to compute their own
+    # equilibrium potential from their own permeabilities. engine.run_simulation
+    # combines them into a shared voltage (resistance-weighted) fresh every timestep.
+    pathway_10b = Pathway(name="10b", junctions=_chain_junctions(n_strands, P_NA_10B, P_CL, P_MG_10B), resistance=R_10B)
+    pathway_1619 = Pathway(name="16_19", junctions=_chain_junctions(n_strands, P_NA_1619, P_CL, P_MG_1619), resistance=R_1619)
+    return Scenario(
+        name=f"TAL State 2, parallel claudins (cTAL), {n_strands} strands",
+        settings=TAL_SETTINGS,
+        compartments=compartments,
+        pathways=(pathway_10b, pathway_1619),
+        fixed_compartments=(names[0], names[-1]),
+    )
+
+
+def _tal_state2_avg(n_strands=3) -> Scenario:
+    """Late/cortical TAL (cTAL), single averaged claudin (double permeability) for comparison against parallel mode."""
+    compartments = _chain_compartments(n_strands, apical_na=50, apical_cl=45, apical_mg=0.2)
+    names = _chain_compartment_names(n_strands)
+    pathway = Pathway(name="avg", junctions=_chain_junctions(n_strands, P_NA_AVG, P_CL_AVG, P_MG_AVG))
+    return Scenario(
+        name=f"TAL State 2, averaged claudin (cTAL), {n_strands} strands",
+        settings=TAL_SETTINGS,
+        compartments=compartments,
+        pathways=(pathway,),
+        fixed_compartments=(names[0], names[-1]),
     )
 
 
 TAL_STATE1 = _tal_state1()
 TAL_STATE2_PARALLEL = _tal_state2_parallel()
 TAL_STATE2_AVG = _tal_state2_avg()
+
+TAL_STATE1_5_STRANDS = _tal_state1(n_strands=5)
+TAL_STATE2_PARALLEL_5_STRANDS = _tal_state2_parallel(n_strands=5)
+TAL_STATE2_AVG_5_STRANDS = _tal_state2_avg(n_strands=5)
