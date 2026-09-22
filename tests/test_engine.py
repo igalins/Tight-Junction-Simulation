@@ -1,21 +1,16 @@
 """Tests for the segment-agnostic simulation engine, including a regression check
 against a baseline captured from the pre-refactor notebook code."""
-import dataclasses
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from paracellular_transport.config import PHYSICAL_CONSTANTS, TAL_STATE1, TAL_STATE2_AVG, TAL_STATE2_PARALLEL, CompartmentSpec, JunctionSpec, Pathway, Scenario, SimulationSettings
-from paracellular_transport.engine import build_scenario, run_scenario, run_simulation
+from paracellular_transport.config import PHYSICAL_CONSTANTS, TAL_STATE1, TAL_STATE1_5_STRANDS, TAL_STATE2_AVG, TAL_STATE2_AVG_5_STRANDS, TAL_STATE2_PARALLEL, TAL_STATE2_PARALLEL_5_STRANDS, CompartmentSpec, JunctionSpec, Pathway, Scenario, SimulationSettings
+from paracellular_transport.engine import build_scenario, find_steady_state, run_scenario, run_simulation, steady_state_for_scenario, steady_state_gap, with_total_time_steps
 from paracellular_transport.models import Compartment, Junctions
 from paracellular_transport.physics import shared_voltage
 
 BASELINE_PATH = Path(__file__).parent / "data" / "tal_regression_baseline.npz"
-
-
-def with_total_time_steps(scenario: Scenario, total_time_steps: int) -> Scenario:
-    return dataclasses.replace(scenario, settings=dataclasses.replace(scenario.settings, total_time_steps=total_time_steps))
 
 
 class TestBuildScenario:
@@ -226,3 +221,115 @@ class TestConcentrationTrajectoryDependsOnVolume:
         default = self._deltas_after_one_step(apical_volume=8e-20, basolateral_volume=8e-20)
         smaller_donor = self._deltas_after_one_step(apical_volume=8e-20 / 10, basolateral_volume=8e-20)
         assert smaller_donor['basolateral'] == pytest.approx(default['basolateral'] / 10)
+
+
+class Test5StrandScenariosRunEndToEnd:
+    """Confirms the engine is genuinely chain-length-agnostic, not just in theory:
+    the 6-compartment/5-junction scenarios must build and run without error."""
+
+    @pytest.mark.parametrize("scenario", [TAL_STATE1_5_STRANDS, TAL_STATE2_PARALLEL_5_STRANDS, TAL_STATE2_AVG_5_STRANDS])
+    def test_runs_and_produces_history_for_every_compartment(self, scenario):
+        result = run_scenario(with_total_time_steps(scenario, 5))
+
+        assert len(result.time_axis) == 5
+        assert set(result.concentration_history) == set(scenario.fixed_compartments) | {'B', 'C', 'D', 'E'}
+        for comp, ions in result.concentration_history.items():
+            for ion in ('Na', 'Cl', 'Mg'):
+                assert len(ions[ion]) == 5
+
+    def test_interior_compartments_evolve_while_boundaries_stay_fixed(self):
+        result = run_scenario(with_total_time_steps(TAL_STATE1_5_STRANDS, 5))
+
+        for ion in ('Na', 'Cl', 'Mg'):
+            assert result.concentration_history['A'][ion] == [result.concentration_history['A'][ion][0]] * 5
+            assert result.concentration_history['F'][ion] == [result.concentration_history['F'][ion][0]] * 5
+            assert result.concentration_history['B'][ion][1] != result.concentration_history['B'][ion][0]
+
+
+class TestFindSteadyState:
+    """find_steady_state solves the same model run_simulation forward-integrates,
+    so these tests don't depend on total_time_steps at all -- the solve is fast
+    (root-finding, not a million-step loop) regardless of a scenario's own setting."""
+
+    def test_converges_for_single_pathway(self):
+        result = steady_state_for_scenario(TAL_STATE1)
+        assert result.success
+        assert result.max_abs_rate < 1e-6
+
+    def test_converges_for_two_pathway_shared_voltage(self):
+        """Exercises the shared-voltage-combination branch inside _step_deltas."""
+        result = steady_state_for_scenario(TAL_STATE2_PARALLEL)
+        assert result.success
+        assert result.max_abs_rate < 1e-6
+
+    def test_fixed_compartments_are_excluded_from_the_solve(self):
+        result = steady_state_for_scenario(TAL_STATE1)
+        apical_spec = TAL_STATE1.compartments[0]
+        assert result.concentrations['A'] == {'Na': apical_spec.na_conc, 'Cl': apical_spec.cl_conc, 'Mg': apical_spec.mg_conc}
+
+    def test_raises_for_missing_pathway_resistances(self):
+        """_prepare_pathways' validation is shared with run_simulation -- same conditions must raise here too."""
+        compartments, pathway_junctions = build_scenario(TAL_STATE2_PARALLEL)
+        with pytest.raises(ValueError):
+            find_steady_state(
+                compartments, pathway_junctions, TAL_STATE2_PARALLEL.settings,
+                pathway_resistances={'10b': 14.0},  # missing '16_19'
+            )
+
+    def test_steady_state_is_a_fixed_point_of_run_simulation(self):
+        """Setting every compartment to find_steady_state's solution and then running
+        a modest number of run_simulation steps should barely move anything -- proving
+        the solved state is a genuine fixed point of the SAME physics run_simulation
+        uses (both share _step_deltas), not a separately-reimplemented approximation."""
+        compartments, pathway_junctions = build_scenario(TAL_STATE1)
+        steady = find_steady_state(
+            compartments, pathway_junctions, TAL_STATE1.settings, fixed_compartments=TAL_STATE1.fixed_compartments
+        )
+        assert steady.success
+
+        # compartments now hold the solved steady state (find_steady_state mutates in place)
+        settings = with_total_time_steps(TAL_STATE1, 100).settings
+        result = run_simulation(compartments, pathway_junctions, settings, fixed_compartments=TAL_STATE1.fixed_compartments)
+
+        for name in ('B', 'C'):
+            for ion in ('Na', 'Cl', 'Mg'):
+                first = result.concentration_history[name][ion][0]
+                last = result.concentration_history[name][ion][-1]
+                assert last == pytest.approx(first, abs=1e-6)
+
+
+class TestSteadyStateGap:
+    def test_gap_shrinks_towards_the_steady_state(self):
+        """A short run starting far from steady state (TAL_STATE1's own initial
+        condition) should end up closer to the true steady state than it started."""
+        steady = steady_state_for_scenario(TAL_STATE1)
+        result = run_scenario(with_total_time_steps(TAL_STATE1, 200))
+
+        gap_per_variable, max_gap_over_time = steady_state_gap(result, steady, TAL_STATE1.fixed_compartments)
+
+        assert len(max_gap_over_time) == len(result.time_axis) == 200
+        assert max_gap_over_time[-1] < max_gap_over_time[0]
+        for key, gaps in gap_per_variable.items():
+            assert len(gaps) == 200
+            assert gaps[-1] < gaps[0], f"{key} did not get closer to steady state"
+
+    def test_excludes_fixed_compartments(self):
+        steady = steady_state_for_scenario(TAL_STATE1)
+        result = run_scenario(with_total_time_steps(TAL_STATE1, 5))
+
+        gap_per_variable, _ = steady_state_gap(result, steady, TAL_STATE1.fixed_compartments)
+
+        names_present = {name for name, _ in gap_per_variable}
+        assert names_present.isdisjoint(TAL_STATE1.fixed_compartments)
+
+    def test_indexing_at_a_given_total_time_steps_matches_a_run_of_that_length(self):
+        """max_gap_over_time[N-1] from a longer run should match running only N steps --
+        this is the whole point: checking a candidate total_time_steps without re-running."""
+        steady = steady_state_for_scenario(TAL_STATE1)
+        long_result = run_scenario(with_total_time_steps(TAL_STATE1, 50))
+        short_result = run_scenario(with_total_time_steps(TAL_STATE1, 10))
+
+        _, long_gap = steady_state_gap(long_result, steady, TAL_STATE1.fixed_compartments)
+        _, short_gap = steady_state_gap(short_result, steady, TAL_STATE1.fixed_compartments)
+
+        assert long_gap[9] == pytest.approx(short_gap[-1])
