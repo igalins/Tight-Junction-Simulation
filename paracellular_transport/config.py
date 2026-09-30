@@ -122,7 +122,7 @@ class Scenario:
 # Thick Ascending Limb (TAL) data
 # ============================================================================
 
-TAL_SETTINGS = SimulationSettings(dt=0.0001, total_time_steps=2_000_000, temperature=310)
+TAL_SETTINGS = SimulationSettings(dt=0.0001, total_time_steps=5_000_000, temperature=310)
 
 # Currently uniform across all TAL compartments -- compartments could be given
 # different volumes independently, since each CompartmentSpec carries its own.
@@ -144,6 +144,13 @@ P_MG_1619 = 8.5
 P_NA_AVG = P_NA_10B + P_NA_1619
 P_MG_AVG = P_MG_10B + P_MG_1619
 P_CL_AVG = P_CL * 2
+
+# Per-strand permeability profiles (p_na, p_cl, p_mg), for chains whose strands
+# are not all the same claudin -- see ``_tal_state2_strand_order``.
+CLAUDIN_PROFILES = {
+    '10b': (P_NA_10B, P_CL, P_MG_10B),
+    '16_19': (P_NA_1619, P_CL, P_MG_1619),
+}
 
 # ---- Resistances for kidney tubule, DOI: 10.1016/j.kint.2017.08.029 ----
 R_10B = 14.0
@@ -236,6 +243,38 @@ def _tal_state2_avg(n_strands=3) -> Scenario:
     )
 
 
+def _tal_state2_strand_order(strand_order) -> Scenario:
+    """Late/cortical TAL (cTAL) chain whose strands are individually Cldn10b or
+    Cldn16/19, named apical-to-basolateral (lumen first).
+
+    One pathway, not two: every strand position carries a single claudin, so
+    there is no second parallel route to combine into a shared voltage. Compare
+    orders of the *same composition* against each other to isolate the effect
+    of arrangement alone.
+
+    Args:
+        strand_order: Claudin key per strand, apical to basolateral, e.g.
+            ``('10b', '16_19', '10b')``. Keys index ``CLAUDIN_PROFILES``.
+
+    Returns:
+        The corresponding ``Scenario``.
+    """
+    n_strands = len(strand_order)
+    compartments = _chain_compartments(n_strands, apical_na=50, apical_cl=45, apical_mg=0.2)
+    names = _chain_compartment_names(n_strands)
+    junctions = tuple(
+        JunctionSpec(names[i], names[i + 1], *CLAUDIN_PROFILES[claudin])
+        for i, claudin in enumerate(strand_order)
+    )
+    return Scenario(
+        name=f"TAL State 2, strand order {' -> '.join(strand_order)}",
+        settings=TAL_SETTINGS,
+        compartments=compartments,
+        pathways=(Pathway(name='chain', junctions=junctions),),
+        fixed_compartments=(names[0], names[-1]),
+    )
+
+
 TAL_STATE1 = _tal_state1()
 TAL_STATE2_PARALLEL = _tal_state2_parallel()
 TAL_STATE2_AVG = _tal_state2_avg()
@@ -243,3 +282,10 @@ TAL_STATE2_AVG = _tal_state2_avg()
 TAL_STATE1_5_STRANDS = _tal_state1(n_strands=5)
 TAL_STATE2_PARALLEL_5_STRANDS = _tal_state2_parallel(n_strands=5)
 TAL_STATE2_AVG_5_STRANDS = _tal_state2_avg(n_strands=5)
+
+# Same composition (3x Cldn10b, 2x Cldn16/19) in three different arrangements,
+# so any difference between them is down to order alone. The first-named strand
+# is the apical/luminal one; the last two are exact reversals of each other.
+TAL_STATE2_ORDER_ALTERNATING = _tal_state2_strand_order(('10b', '16_19', '10b', '16_19', '10b'))
+TAL_STATE2_ORDER_10B_FIRST = _tal_state2_strand_order(('10b', '10b', '10b', '16_19', '16_19'))
+TAL_STATE2_ORDER_1619_FIRST = _tal_state2_strand_order(('16_19', '16_19', '10b', '10b', '10b'))
