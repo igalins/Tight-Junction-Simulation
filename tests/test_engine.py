@@ -5,8 +5,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from paracellular_transport.config import PHYSICAL_CONSTANTS, TAL_STATE1, TAL_STATE1_5_STRANDS, TAL_STATE2_AVG, TAL_STATE2_AVG_5_STRANDS, TAL_STATE2_PARALLEL, TAL_STATE2_PARALLEL_5_STRANDS, CompartmentSpec, JunctionSpec, Pathway, Scenario, SimulationSettings
-from paracellular_transport.engine import build_scenario, find_steady_state, run_scenario, run_simulation, steady_state_for_scenario, steady_state_gap, with_total_time_steps
+from paracellular_transport.config import PHYSICAL_CONSTANTS, TAL_STATE1, TAL_STATE1_5_STRANDS, TAL_STATE2_AVG, TAL_STATE2_AVG_5_STRANDS, TAL_STATE2_ORDER_10B_FIRST, TAL_STATE2_ORDER_1619_FIRST, TAL_STATE2_ORDER_ALTERNATING, TAL_STATE2_PARALLEL, TAL_STATE2_PARALLEL_5_STRANDS, CompartmentSpec, JunctionSpec, Pathway, Scenario, SimulationSettings
+from paracellular_transport.engine import build_scenario, find_steady_state, run_scenario, run_simulation, steady_state_for_scenario, steady_state_gap, transepithelial_potential, with_total_time_steps
 from paracellular_transport.models import Compartment, Junctions
 from paracellular_transport.physics import shared_voltage
 
@@ -244,6 +244,40 @@ class Test5StrandScenariosRunEndToEnd:
             assert result.concentration_history['A'][ion] == [result.concentration_history['A'][ion][0]] * 5
             assert result.concentration_history['F'][ion] == [result.concentration_history['F'][ion][0]] * 5
             assert result.concentration_history['B'][ion][1] != result.concentration_history['B'][ion][0]
+
+
+class TestStrandOrderScenariosRunEndToEnd:
+    """Strand order must actually change the result -- otherwise the three
+    scenarios would be an experiment that cannot detect what it is testing."""
+
+    ORDERS = [TAL_STATE2_ORDER_ALTERNATING, TAL_STATE2_ORDER_10B_FIRST, TAL_STATE2_ORDER_1619_FIRST]
+
+    @pytest.mark.parametrize("scenario", ORDERS)
+    def test_runs_as_a_single_pathway_chain(self, scenario):
+        result = run_scenario(with_total_time_steps(scenario, 5))
+
+        assert list(result.potential_history) == ['chain']
+        assert len(result.time_axis) == 5
+
+    def test_same_composition_in_different_orders_gives_different_potentials(self):
+        finals = [
+            transepithelial_potential(
+                run_scenario(with_total_time_steps(scenario, 200)).potential_history['chain']
+            )[-1]
+            for scenario in self.ORDERS
+        ]
+        assert len(set(round(v, 6) for v in finals)) == 3
+
+    def test_reversing_the_chain_changes_the_potential(self):
+        """The concentration gradient is directional (dilute lumen -> plasma-like
+        blood side), so a reversed chain is not an equivalent system."""
+        forward, backward = (
+            transepithelial_potential(
+                run_scenario(with_total_time_steps(scenario, 200)).potential_history['chain']
+            )[-1]
+            for scenario in (TAL_STATE2_ORDER_10B_FIRST, TAL_STATE2_ORDER_1619_FIRST)
+        )
+        assert forward != pytest.approx(backward, rel=1e-3)
 
 
 class TestFindSteadyState:

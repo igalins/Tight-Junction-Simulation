@@ -2,6 +2,7 @@
 import pytest
 
 from paracellular_transport.config import (
+    CLAUDIN_PROFILES,
     P_CL,
     P_CL_AVG,
     P_MG_10B,
@@ -13,6 +14,9 @@ from paracellular_transport.config import (
     TAL_STATE1,
     TAL_STATE1_5_STRANDS,
     TAL_STATE2_AVG_5_STRANDS,
+    TAL_STATE2_ORDER_10B_FIRST,
+    TAL_STATE2_ORDER_1619_FIRST,
+    TAL_STATE2_ORDER_ALTERNATING,
     TAL_STATE2_PARALLEL_5_STRANDS,
     V_CLAMP_STATE1,
 )
@@ -51,3 +55,41 @@ class Test5StrandScenarios:
     def test_state1_voltage_clamps_still_sum_to_the_total_clamp(self):
         clamps = [j.voltage_clamp for pathway in TAL_STATE1_5_STRANDS.pathways for j in pathway.junctions]
         assert sum(clamps) == pytest.approx(V_CLAMP_STATE1)
+
+
+class TestStrandOrderScenarios:
+    """The three strand-order scenarios must differ only in arrangement -- if they
+    ever differ in composition too, the comparison stops isolating order."""
+
+    ORDERS = [TAL_STATE2_ORDER_ALTERNATING, TAL_STATE2_ORDER_10B_FIRST, TAL_STATE2_ORDER_1619_FIRST]
+
+    @pytest.mark.parametrize("scenario", ORDERS)
+    def test_is_a_single_five_strand_pathway(self, scenario):
+        assert len(scenario.pathways) == 1
+        assert len(scenario.pathways[0].junctions) == 5
+        assert len(scenario.compartments) == 6
+        assert scenario.fixed_compartments == ('A', 'F')
+
+    def test_all_three_orders_share_the_same_composition(self):
+        compositions = [
+            sorted((j.p_na, j.p_cl, j.p_mg) for j in scenario.pathways[0].junctions)
+            for scenario in self.ORDERS
+        ]
+        assert compositions[0] == compositions[1] == compositions[2]
+
+    def test_composition_is_three_10b_and_two_1619(self):
+        for scenario in self.ORDERS:
+            profiles = [(j.p_na, j.p_cl, j.p_mg) for j in scenario.pathways[0].junctions]
+            assert profiles.count(CLAUDIN_PROFILES['10b']) == 3
+            assert profiles.count(CLAUDIN_PROFILES['16_19']) == 2
+
+    def test_the_two_blocked_orders_are_exact_reversals(self):
+        forward = [(j.p_na, j.p_cl, j.p_mg) for j in TAL_STATE2_ORDER_10B_FIRST.pathways[0].junctions]
+        backward = [(j.p_na, j.p_cl, j.p_mg) for j in TAL_STATE2_ORDER_1619_FIRST.pathways[0].junctions]
+        assert forward == backward[::-1]
+
+    @pytest.mark.parametrize("scenario", ORDERS)
+    def test_junctions_form_a_connected_chain(self, scenario):
+        junctions = scenario.pathways[0].junctions
+        assert [j.apical for j in junctions] == ['A', 'B', 'C', 'D', 'E']
+        assert [j.basolateral for j in junctions] == ['B', 'C', 'D', 'E', 'F']
