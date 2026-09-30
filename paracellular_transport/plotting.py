@@ -8,6 +8,8 @@ caller explicitly asks for it.
 """
 import matplotlib.pyplot as plt
 
+from .engine import transepithelial_potential
+
 ION_LABELS = {'Na': 'Na$^+$', 'Cl': 'Cl$^-$', 'Mg': 'Mg$^{2+}$'}
 
 
@@ -116,6 +118,41 @@ def plot_membrane_potential(transepithelial_potential, time_axis, title=None, sa
     plt.xlabel('Time (a.u.)')
     plt.title('Total Transepithelial Potential (A→D)')
     plt.axhline(0, color='black', lw=1, ls='--')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path)
+    plt.show()
+
+
+def plot_potential_comparison(results, title=None, save_path=None):
+    """Overlay several scenarios' transepithelial potentials on one axis.
+
+    Unlike flux, the transepithelial potential is the sum of every junction's
+    potential in the chain regardless of how many junctions there are (they sit
+    in series), so this stays comparable across chains of different lengths --
+    no terminal-junction treatment is needed here (contrast ``terminal_flow``).
+
+    Args:
+        results: dict of label -> ``engine.SimulationResult``, plotted in
+            insertion order.
+        title: Optional plot title.
+        save_path: If given, save the figure to this path.
+    """
+    plt.figure(figsize=(10, 5))
+
+    for label, result in results.items():
+        # Any pathway gives the same trace: where two parallel pathways exist,
+        # run_simulation clamps both to the shared voltage, so both record it.
+        pathway = next(iter(result.potential_history))
+        plt.plot(result.time_axis, transepithelial_potential(result.potential_history[pathway]), label=label)
+
+    plt.ylabel('Transepithelial Potential (mV)')
+    plt.xlabel('Time (a.u.)')
+    plt.title(title or 'Transepithelial Potential Comparison')
+    # No zero line here: these traces sit far from 0, and forcing it into view
+    # would flatten the differences this plot exists to show.
+    plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     if save_path:
